@@ -42,6 +42,9 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 | `transcript.json` | canonical transcript — engine provenance + timed, speaker-tagged segments |
 | `transcript.md` | the same transcript rendered for reading |
 | `transcribe.log` | transcription progress/errors for this session |
+| `summary.json` | canonical notes — title, abstract, sections, decisions, action items |
+| `summary.md` | the same notes rendered for reading |
+| `summarize.log` | summarization progress/errors for this session |
 
 Two tracks on purpose: speech models do better on clean single-source audio,
 and mic-vs-system is free two-party diarization — `me` vs `them` with no
@@ -68,6 +71,51 @@ on next launch (the filesystem is the queue: a session with `meta.json` but no
 The engine sits behind a small protocol; a Whisper engine (WhisperKit
 large-v3-turbo) is planned as the fallback / re-transcription option.
 
+## Notes
+
+Off by default; switch it on with `summarization.enabled`. Once on, each
+finished transcript becomes Granola-style notes — a specific title, a
+two-sentence abstract, template-driven sections, decisions, and owned action
+items — written by **Apple's on-device foundation model** via the
+FoundationModels framework. Still nothing leaves the machine.
+
+**Requires macOS 26 with Apple Intelligence enabled** (System Settings → Apple
+Intelligence & Siri). Recording and transcription are unaffected if it isn't:
+`quill doctor` reports why, sessions stay queued, and they are summarized on
+the next run once the model becomes available. Summarization can never prevent
+quill from recording.
+
+The window is the constraint. An hour of meeting is ~12,000 tokens against a
+4,096-token on-device context (8,192 on macOS 27, read at runtime), so notes are
+produced map-reduce: the transcript is re-rendered compactly, split into
+overlapping chunks, each extracted in its own session, and the findings merged.
+
+The split of work is deliberate. The model extracts from one passage at a time
+and writes the title and abstract. Deduplication, ordering, ownership and every
+**timestamp** are assembled in Swift — a small model asked to reproduce
+timestamps invents them, so each chunk carries its own time range and decisions
+are stamped from that. Cited times are ground truth, not guesses.
+
+Expect competent extraction and weaker synthesis: this is a ~3B model, not a
+frontier one. Action-item ownership is `me` / `them` / `unassigned`, since
+attribution is filesystem-based and every remote participant collapses into one
+`them`.
+
+### Templates
+
+Granola's trick is that the sparse notes you type during a call guide the model.
+quill has no note surface, so a template plays that role: its `##` headings are
+the sections the model fills from the transcript.
+
+```sh
+quill templates            # list them; shows which is active
+quill templates --write    # write the built-ins to ~/.config/quill/templates/
+```
+
+Built-ins: `default`, `standup`, `one-on-one`, `interview`, `sales`. Edit any
+written file to change the shape of your notes; `--write` never clobbers your
+edits. Select one with `summarization.template`.
+
 ## Config
 
 Optional, at `~/.config/quill/config.json`:
@@ -76,6 +124,7 @@ Optional, at `~/.config/quill/config.json`:
 {
   "recordings_dir": "~/Recordings",
   "transcription": { "enabled": true, "engine": "parakeet" },
+  "summarization": { "enabled": true, "template": "default", "calendar_titles": false },
   "on_stop": "my-hook"
 }
 ```
@@ -83,6 +132,15 @@ Optional, at `~/.config/quill/config.json`:
 - `recordings_dir` — where sessions land. Resolution order: `--out` flag >
   config > `~/Recordings`.
 - `transcription.enabled` — set `false` to just record.
+- `summarization.enabled` — on-device notes after each transcript. Default
+  `false`; needs macOS 26 with Apple Intelligence on.
+- `summarization.template` — which template shapes the notes. See
+  `quill templates`.
+- `summarization.calendar_titles` — title notes after the calendar event the
+  recording overlaps, which is usually better than one the model invents.
+  Default `false`, and deliberately so: enabling it prompts for access to every
+  event in your calendar, a far broader grant than recording audio you started
+  by hand. Denied access is not an error — the generated title stands.
 - `mic_voice_processing` — Apple's echo cancellation on the mic (default off).
   Set `true` when recording meetings through the speakers, so playback doesn't
   bleed into the mic track and get transcribed twice as "me". The trade: while
@@ -100,6 +158,8 @@ Optional, at `~/.config/quill/config.json`:
 quill                        # run the menu-bar daemon (^C to quit)
 quill run --out <dir>        # custom recordings root (default ~/Recordings)
 quill doctor                 # check permissions, recordings folder, models
+quill templates              # list summary templates
+quill templates --write      # write the built-ins out to edit
 quill install --launch-at-login
 quill install --uninstall
 ```
@@ -112,6 +172,8 @@ quill install --uninstall
 - **AVAudioEngine** — mic capture
 - **AVAudioFile** — streaming AAC encode into CAF
 - **FluidAudio / Parakeet** — on-device Core ML transcription
+- **FoundationModels** — Apple's on-device model for notes (macOS 26+),
+  guided generation for structure
 - **NSStatusItem** — the whole UI
 
 ## Gotchas
@@ -125,3 +187,11 @@ quill install --uninstall
   engine.
 - The binary embeds its Info.plist (`__TEXT,__info_plist`) so TCC can
   attribute permissions to quill itself when running as a LaunchAgent.
+- Notes need Apple Intelligence switched on, which is separate from having a
+  supported Mac. `quill doctor` distinguishes the two.
+- The on-device model is rate-limited for background processes on battery —
+  which is what quill is when installed as a LaunchAgent. A deferred summary
+  isn't lost; it's retried on the next drain or the next launch. Plug in if
+  you want notes immediately.
+- Notes are English-only, following Parakeet. An unsupported language records a
+  permanent `summary.failed` and leaves the transcript untouched.

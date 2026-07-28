@@ -41,6 +41,16 @@ struct MeetingNotes: Codable, Equatable {
     let action_items: [ActionItem]
     let open_questions: [String]
 
+    /// Replace the model's title, for when the calendar knows the meeting's
+    /// real name.
+    func withTitle(_ replacement: String) -> MeetingNotes {
+        MeetingNotes(
+            engine: engine, model: model, template: template, created_at: created_at,
+            title: replacement, tldr: tldr, sections: sections, decisions: decisions,
+            action_items: action_items, open_questions: open_questions
+        )
+    }
+
     /// Write summary.json and render summary.md. Both atomic, so a partially
     /// written summary never exists on disk — the queue treats the presence of
     /// summary.json as "done".

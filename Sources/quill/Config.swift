@@ -62,6 +62,13 @@ enum Config {
         summarization()?["template"] as? String ?? Template.fallbackName
     }
 
+    /// Whether to title notes from the overlapping calendar event. Default off:
+    /// switching it on prompts for access to every event in the calendar, which
+    /// is a far broader grant than recording audio the user started by hand.
+    static func calendarTitles() -> Bool {
+        summarization()?["calendar_titles"] as? Bool ?? false
+    }
+
     private static func summarization() -> [String: Any]? {
         load()?["summarization"] as? [String: Any]
     }

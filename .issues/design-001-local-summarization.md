@@ -1,9 +1,40 @@
 ---
 title: "Granola-style meeting notes from a local Apple foundation model"
 date: 2026-07-28
-status: proposed
+status: implemented
 affects: "post-transcription pipeline, config, minimum OS version"
 ---
+
+## Outcome
+
+Implemented across phases 0, 2, 3 and 4. Phase 1 was dropped: it depended on
+the `fm` CLI, which ships with macOS 27, and this machine runs 26.5 — prompt
+iteration moved in-process against the 4,096-token window as the plan's stated
+fallback for that case.
+
+Three findings changed the design as built:
+
+1. **The bundle-less concern was unfounded.** `FoundationModels` links, loads
+   and reports availability correctly from a plain SPM executable with
+   `Bundle.main.bundleIdentifier == nil`. Quill's no-`.app` architecture needed
+   no accommodation. This was the blocking risk and it evaporated.
+2. **`.unavailable` had to become retryable.** Treating "Apple Intelligence is
+   off" as permanent would write a `summary.failed` marker, so sessions recorded
+   before the user enabled Apple Intelligence could never be backfilled. It is
+   now retryable and sets an `engineDown` flag so a queue of ten sessions
+   produces one failure per drain rather than ten.
+3. **The doctor check must never hard-fail.** `Run.runMain` treats any `.fail`
+   as fatal, so the first version of `checkSummarization` would have stopped
+   quill from *recording* whenever summarization was misconfigured. It now only
+   ever warns, pinned by a test over every input combination.
+
+The scaffolding estimate in this document was also measured rather than assumed,
+and corrected downward — see Constraint 1.
+
+Verified end to end against a prepared session: `resumePending` picks up a
+transcript with no notes, skips re-transcription, logs the availability failure,
+and writes no marker so the session stays queued. What remains untested is
+generation quality, which is gated on enabling Apple Intelligence.
 
 ## Context
 

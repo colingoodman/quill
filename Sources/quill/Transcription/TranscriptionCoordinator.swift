@@ -159,11 +159,14 @@ actor TranscriptionCoordinator {
                 return
             }
             summaryLog(dir, "summarizing with \(engine.name) · template \(template.name)")
-            let notes = try await engine.summarize(
+            var notes = try await engine.summarize(
                 segments: transcript.segments,
                 template: template,
                 log: { [dir] message in Self.append(message, toSummaryLogIn: dir) }
             )
+            if let calendarTitle = await Self.calendarTitle(for: dir) {
+                notes = notes.withTitle(calendarTitle)
+            }
             try notes.write(to: dir)
             summaryLog(dir, "done — \(notes.sections.count) section(s), "
                 + "\(notes.decisions.count) decision(s), "
@@ -200,6 +203,27 @@ actor TranscriptionCoordinator {
         try await engine.prepare()
         summarizer = engine
         return engine
+    }
+
+    /// The calendar's name for this meeting, when the user has opted in. Reads
+    /// the session's own start and end from meta.json — no calendar lookup
+    /// happens at all unless the feature is switched on.
+    nonisolated private static func calendarTitle(for dir: URL) async -> String? {
+        guard Config.calendarTitles() else { return nil }
+        guard
+            let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let startedText = json["started"] as? String,
+            let endedText = json["ended"] as? String
+        else { return nil }
+
+        let iso = ISO8601DateFormatter()
+        guard let started = iso.date(from: startedText), let ended = iso.date(from: endedText) else {
+            return nil
+        }
+        return await CalendarContext.title(from: started, to: ended) { message in
+            append(message, toSummaryLogIn: dir)
+        }
     }
 
     private func markSummaryFailed(_ dir: URL, _ reason: String) {
