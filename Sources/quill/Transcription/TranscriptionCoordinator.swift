@@ -33,7 +33,7 @@ actor TranscriptionCoordinator {
     /// on_stop hook still fires — it just gets an untranscribed folder.
     func enqueue(_ sessionDir: URL) {
         guard Config.transcriptionEnabled() else {
-            runHook(for: sessionDir)
+            runHookOnce(for: sessionDir)
             return
         }
         queue.append(sessionDir)
@@ -131,7 +131,14 @@ actor TranscriptionCoordinator {
                 publish(.summarizing(session: dir.lastPathComponent))
                 await summarize(dir)
             }
-            runHook(for: dir)
+
+            // Fire only when nothing further is coming for this session, so the
+            // hook receives a finished folder. A summary merely deferred (rate
+            // limited) is still coming, so hold off — but an engine that is down
+            // is not, and starving the hook forever would be worse.
+            if !Self.needsSummary(dir) || engineDown {
+                runHookOnce(for: dir)
+            }
         }
         await engine?.release()
         engine = nil
@@ -288,9 +295,26 @@ actor TranscriptionCoordinator {
         return engine
     }
 
+    /// Fire the hook at most once per session, ever.
+    ///
+    /// A session can be visited by more than one drain — transcribed in the
+    /// first, summarized in a later one after a deferral — and the hook is a
+    /// side effect on the user's machine, so firing it twice for one meeting
+    /// would duplicate whatever it does. The marker is only written when a hook
+    /// is actually configured, so sessions stay clean for everyone else.
+    private func runHookOnce(for dir: URL) {
+        guard Config.onStop() != nil else { return }
+        let marker = dir.appendingPathComponent("on_stop.fired")
+        guard !FileManager.default.fileExists(atPath: marker.path) else { return }
+        runHook(for: dir)
+        let line = "\(ISO8601DateFormatter().string(from: Date()))\n"
+        try? Data(line.utf8).write(to: marker)
+    }
+
     /// Fires the configured on_stop shell command with the session directory
-    /// as its sole argument, after the transcript exists (or immediately after
-    /// recording when transcription is disabled).
+    /// as its sole argument, once the session is finished — after the notes are
+    /// written when summarization is on, after the transcript when it is not, or
+    /// immediately after recording when transcription is disabled too.
     private func runHook(for dir: URL) {
         guard let cmd = Config.onStop() else { return }
         let task = Process()

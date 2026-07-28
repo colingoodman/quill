@@ -148,9 +148,11 @@ Optional, at `~/.config/quill/config.json`:
   is configured, but it can't be zeroed). On headphones there's no echo to
   cancel, so raw capture is the better default.
 - `on_stop` — shell command spawned with the session directory as its
-  argument, **after the transcript is written** (or right after recording if
-  transcription is disabled). Wire it to whatever comes next: summarization,
-  filing, indexing.
+  argument, once the session is **finished**: after the notes are written when
+  summarization is on, after the transcript when it isn't, or right after
+  recording when transcription is off too. Fires at most once per session even
+  if a deferred summary means quill visits it again. Wire it to whatever comes
+  next: filing, indexing, sending.
 
 ## CLI
 

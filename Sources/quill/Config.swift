@@ -12,8 +12,9 @@ import Foundation
 ///
 /// Resolution order for the recordings root: --out flag > config file >
 /// ~/Recordings. `on_stop` is a shell command spawned with the session
-/// directory as its argument — after the transcript is written, or right
-/// after recording when transcription is disabled.
+/// directory as its argument once the session is finished — after the notes
+/// when summarization is on, after the transcript when it is not, or right
+/// after recording when transcription is disabled. At most once per session.
 enum Config {
     static let path = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/quill/config.json")
@@ -27,8 +28,7 @@ enum Config {
         return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
     }
 
-    /// Shell command to spawn after each session's transcript is written (or
-    /// after recording, if transcription is disabled), or nil.
+    /// Shell command to spawn once a session is finished, or nil.
     static func onStop() -> String? {
         guard let cmd = load()?["on_stop"] as? String, !cmd.isEmpty else { return nil }
         return cmd
