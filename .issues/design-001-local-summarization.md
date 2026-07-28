@@ -303,14 +303,20 @@ writing no Swift.
 - `README.md` — document summarization, templates, and the macOS 26 floor for
   this feature specifically.
 
-**New:**
+**New (as built):**
 
-- `Sources/quill/Summarization/SummarizationEngine.swift` — protocol and
-  `MeetingNotes` types.
+- `Sources/quill/Summarization/SummarizationEngine.swift` — protocol,
+  `MeetingNotes`, `SummarizationError` retry policy, and `NotesMerger`.
 - `Sources/quill/Summarization/AppleFoundationEngine.swift` — the
   `FoundationModels` implementation, `@available(macOS 26, *)`.
 - `Sources/quill/Summarization/TranscriptCompactor.swift` — compact rendering
   and chunking.
+- `Sources/quill/Summarization/Template.swift` — the note skeleton and builtins.
+- `Sources/quill/Summarization/CalendarContext.swift` — opt-in EventKit titling.
+- `Sources/quill/Templates.swift` — the `quill templates` subcommand.
+- `Tests/quillTests/` — the package's first test target: 55 tests across
+  compaction, chunking, merging, rendering, templates, retry policy, and the
+  invariant that a summarization check can never block startup.
 
 **Flow:**
 
