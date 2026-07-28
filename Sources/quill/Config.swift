@@ -5,6 +5,7 @@ import Foundation
 ///     {
 ///       "recordings_dir": "~/Recordings",
 ///       "transcription": { "enabled": true, "engine": "parakeet" },
+///       "summarization": { "enabled": true, "template": "default" },
 ///       "mic_voice_processing": true,
 ///       "on_stop": "my-hook"
 ///     }
@@ -46,6 +47,23 @@ enum Config {
 
     private static func transcription() -> [String: Any]? {
         load()?["transcription"] as? [String: Any]
+    }
+
+    /// Whether finished transcripts are summarized into Granola-style notes.
+    /// Default off: it needs macOS 26 with Apple Intelligence enabled, and a
+    /// feature that silently does nothing is worse than one you switch on.
+    static func summarizationEnabled() -> Bool {
+        summarization()?["enabled"] as? Bool ?? false
+    }
+
+    /// Template name resolved against ~/.config/quill/templates/<name>.md, then
+    /// the builtins. Its headings are the sections the model fills.
+    static func summarizationTemplate() -> String {
+        summarization()?["template"] as? String ?? Template.fallbackName
+    }
+
+    private static func summarization() -> [String: Any]? {
+        load()?["summarization"] as? [String: Any]
     }
 
     /// Apple voice processing (acoustic echo cancellation) on the mic, so

@@ -157,6 +157,8 @@ final class AppController {
             menuBar.updateTranscription(
                 queued > 0 ? "transcribing \(name) · \(queued) queued" : "transcribing \(name)"
             )
+        case .summarizing(let name):
+            menuBar.updateTranscription("writing notes · \(name)")
         case .failed(let name):
             menuBar.updateTranscription("transcription failed · \(name)")
         }

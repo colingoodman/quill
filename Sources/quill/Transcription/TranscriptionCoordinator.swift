@@ -11,12 +11,17 @@ actor TranscriptionCoordinator {
     enum Status: Sendable {
         case idle
         case transcribing(session: String, queued: Int)
+        case summarizing(session: String)
         case failed(session: String)
     }
 
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
+    private var summarizer: SummarizationEngine?
+    /// Set when the model reports itself unavailable, so a queue of ten
+    /// sessions does not produce ten identical failures in one drain.
+    private var engineDown = false
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
 
@@ -35,9 +40,14 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
-    /// Scan the recordings root for sessions that finished (meta.json exists)
-    /// but were never transcribed. Folder names sort chronologically, so
-    /// oldest-first is a name sort.
+    /// Scan the recordings root for sessions with work outstanding: no
+    /// transcript, or a transcript with no notes. Folder names sort
+    /// chronologically, so oldest-first is a name sort.
+    ///
+    /// This is also the retry path for a rate-limited summarization — a
+    /// background process on battery gets deferred, and the deferral resolves
+    /// itself on the next drain or the next launch without any bookkeeping
+    /// beyond what is already on disk.
     func resumePending(root: URL) {
         guard Config.transcriptionEnabled() else { return }
         guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -46,9 +56,14 @@ actor TranscriptionCoordinator {
 
         let fm = FileManager.default
         let pending = entries
-            .filter {
-                fm.fileExists(atPath: $0.appendingPathComponent("meta.json").path)
-                    && !fm.fileExists(atPath: $0.appendingPathComponent("transcript.json").path)
+            .filter { dir in
+                guard fm.fileExists(atPath: dir.appendingPathComponent("meta.json").path) else {
+                    return false
+                }
+                if !fm.fileExists(atPath: dir.appendingPathComponent("transcript.json").path) {
+                    return true
+                }
+                return Self.needsSummary(dir)
             }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         for dir in pending where !queue.contains(dir) {
@@ -56,10 +71,22 @@ actor TranscriptionCoordinator {
         }
         if !pending.isEmpty {
             FileHandle.standardError.write(Data(
-                "resuming \(pending.count) untranscribed session(s)\n".utf8
+                "resuming \(pending.count) unfinished session(s)\n".utf8
             ))
         }
         drainIfIdle()
+    }
+
+    /// Summaries are pending when the transcript exists, the notes do not, and
+    /// no permanent failure was recorded. The marker is what stops a session
+    /// that can never succeed — an unsupported language, a tripped guardrail —
+    /// from being retried on every launch forever.
+    private static func needsSummary(_ dir: URL) -> Bool {
+        guard Config.summarizationEnabled() else { return false }
+        let fm = FileManager.default
+        return fm.fileExists(atPath: dir.appendingPathComponent("transcript.json").path)
+            && !fm.fileExists(atPath: dir.appendingPathComponent("summary.json").path)
+            && !fm.fileExists(atPath: dir.appendingPathComponent("summary.failed").path)
     }
 
     // MARK: -
@@ -68,33 +95,116 @@ actor TranscriptionCoordinator {
         guard !draining, !queue.isEmpty else { return }
         draining = true
         lastFailure = nil
+        // A new drain re-checks availability: the user may have switched Apple
+        // Intelligence on since the last one gave up.
+        engineDown = false
         Task { await drain() }
     }
 
     private func drain() async {
         while !queue.isEmpty {
             let dir = queue.removeFirst()
-            publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
-            do {
-                try await transcribe(dir)
-                notifyUser(title: "quill — transcript ready", body: dir.lastPathComponent)
-                runHook(for: dir)
-            } catch {
-                log(dir, "transcription failed: \(error)")
-                lastFailure = dir.lastPathComponent
-                notifyUser(
-                    title: "quill — transcription failed",
-                    body: "\(dir.lastPathComponent) — see transcribe.log"
-                )
+            let hasTranscript = FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("transcript.json").path
+            )
+
+            // A session resumed only for its notes must not be transcribed
+            // again — that would spend minutes of model time reproducing a
+            // transcript that is already on disk.
+            if !hasTranscript {
+                publish(.transcribing(session: dir.lastPathComponent, queued: queue.count))
+                do {
+                    try await transcribe(dir)
+                    notifyUser(title: "quill — transcript ready", body: dir.lastPathComponent)
+                } catch {
+                    log(dir, "transcription failed: \(error)")
+                    lastFailure = dir.lastPathComponent
+                    notifyUser(
+                        title: "quill — transcription failed",
+                        body: "\(dir.lastPathComponent) — see transcribe.log"
+                    )
+                    continue
+                }
             }
+
+            if !engineDown, Self.needsSummary(dir) {
+                publish(.summarizing(session: dir.lastPathComponent))
+                await summarize(dir)
+            }
+            runHook(for: dir)
         }
         await engine?.release()
         engine = nil
+        await summarizer?.release()
+        summarizer = nil
         publish(lastFailure.map { .failed(session: $0) } ?? .idle)
         draining = false
         // An enqueue that landed between the loop exiting and the release
         // finishing would otherwise sit until the next enqueue.
         drainIfIdle()
+    }
+
+    /// Summarize one session. Failures never propagate: a missing summary is a
+    /// degraded session, not a lost one, and the transcript is already safe on
+    /// disk. Retryable failures leave nothing behind so the next drain retries;
+    /// permanent ones write summary.failed so it does not retry forever.
+    private func summarize(_ dir: URL) async {
+        let template = Template.load(named: Config.summarizationTemplate())
+        do {
+            let engine = try await preparedSummarizer()
+            let transcript = try Transcript.read(from: dir)
+            guard !transcript.segments.isEmpty else {
+                summaryLog(dir, "no segments to summarize")
+                markSummaryFailed(dir, "transcript is empty")
+                return
+            }
+            summaryLog(dir, "summarizing with \(engine.name) · template \(template.name)")
+            let notes = try await engine.summarize(
+                segments: transcript.segments,
+                template: template,
+                log: { [dir] message in Self.append(message, toSummaryLogIn: dir) }
+            )
+            try notes.write(to: dir)
+            summaryLog(dir, "done — \(notes.sections.count) section(s), "
+                + "\(notes.decisions.count) decision(s), "
+                + "\(notes.action_items.count) action(s)")
+            notifyUser(title: "quill — notes ready", body: notes.title)
+        } catch let error as SummarizationError {
+            summaryLog(dir, "\(error)")
+            if error.isEngineDown {
+                engineDown = true
+                FileHandle.standardError.write(Data("\(error)\n".utf8))
+            }
+            if error.isRetryable {
+                // Leave no marker: resumePending picks this up again.
+                summarizer = nil
+            } else {
+                markSummaryFailed(dir, "\(error)")
+                notifyUser(
+                    title: "quill — notes skipped",
+                    body: "\(dir.lastPathComponent) — see summarize.log"
+                )
+            }
+        } catch {
+            summaryLog(dir, "summarization failed: \(error)")
+            markSummaryFailed(dir, "\(error)")
+        }
+    }
+
+    private func preparedSummarizer() async throws -> SummarizationEngine {
+        if let summarizer { return summarizer }
+        guard #available(macOS 26.0, *) else {
+            throw SummarizationError.unavailable("summarization needs macOS 26 or later")
+        }
+        let engine = AppleFoundationEngine()
+        try await engine.prepare()
+        summarizer = engine
+        return engine
+    }
+
+    private func markSummaryFailed(_ dir: URL, _ reason: String) {
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(reason)\n"
+        try? Data(line.utf8).write(to: dir.appendingPathComponent("summary.failed"))
     }
 
     private func transcribe(_ dir: URL) async throws {
@@ -170,8 +280,21 @@ actor TranscriptionCoordinator {
     }
 
     private func log(_ dir: URL, _ message: String) {
+        Self.append(message, to: dir.appendingPathComponent("transcribe.log"))
+    }
+
+    private func summaryLog(_ dir: URL, _ message: String) {
+        Self.append(message, toSummaryLogIn: dir)
+    }
+
+    /// Kept static and nonisolated so the engine can be handed a plain logging
+    /// closure without capturing the actor.
+    nonisolated private static func append(_ message: String, toSummaryLogIn dir: URL) {
+        append(message, to: dir.appendingPathComponent("summarize.log"))
+    }
+
+    nonisolated private static func append(_ message: String, to url: URL) {
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
-        let url = dir.appendingPathComponent("transcribe.log")
         if let handle = FileHandle(forWritingAtPath: url.path) {
             handle.seekToEndOfFile()
             handle.write(Data(line.utf8))

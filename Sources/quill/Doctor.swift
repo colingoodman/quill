@@ -2,6 +2,10 @@ import AVFoundation
 import FluidAudio
 import Foundation
 
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
+
 enum CheckStatus {
     case ok
     case warn(String)
@@ -21,7 +25,60 @@ enum DoctorReport {
             checkSystemAudio(),
             checkRecordingsRoot(recordingsRoot),
             checkTranscription(),
+            checkSummarization(),
         ]
+    }
+
+    /// Never discover after an important meeting that notes were never going to
+    /// be written. Reports the real availability reason, which is usually that
+    /// Apple Intelligence has not been switched on.
+    static func checkSummarization() -> Check {
+        var reason: String?
+        if #available(macOS 26.0, *) {
+            if case .unavailable(let r) = SystemLanguageModel.default.availability {
+                reason = AppleFoundationEngine.describe(r)
+            }
+        } else {
+            reason = "needs macOS 26 or later"
+        }
+        return summarizationCheck(
+            enabled: Config.summarizationEnabled(),
+            unavailableReason: reason,
+            template: Config.summarizationEnabled()
+                ? Template.load(named: Config.summarizationTemplate()).name
+                : Template.fallbackName
+        )
+    }
+
+    /// Split out from the availability lookup so the reporting rules can be
+    /// tested without a model or a config file.
+    ///
+    /// Never returns `.fail`. `Run` treats a hard failure as fatal, and an
+    /// unusable optional summarizer must not stop quill from recording — losing
+    /// a meeting is far worse than losing its notes.
+    static func summarizationCheck(
+        enabled: Bool,
+        unavailableReason: String?,
+        template: String
+    ) -> Check {
+        guard enabled else {
+            return Check(name: "summarization", status: .warn("disabled in config"), remediation: nil)
+        }
+        guard let unavailableReason else {
+            return Check(
+                name: "summarization",
+                status: .ok,
+                remediation: nil
+            )
+        }
+        return Check(
+            name: "summarization",
+            status: .warn("\(unavailableReason) — recording and transcription unaffected"),
+            remediation: unavailableReason.contains("Apple Intelligence is off")
+                ? "System Settings → Apple Intelligence & Siri → turn on Apple Intelligence. "
+                    + "Sessions already recorded are summarized on the next run."
+                : "template \"\(template)\" is ready; the model is not"
+        )
     }
 
     static func checkMicrophone() -> Check {
