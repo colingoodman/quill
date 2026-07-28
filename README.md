@@ -24,7 +24,9 @@ transcription speed.
 ## How to use
 
 1. **Run it** (`quill` in a terminal, or the LaunchAgent).
-2. **Click the feather in the menu bar → Start recording.** First use prompts
+2. **Click the feather in the menu bar → Start recording**, or use the Start
+   button in the [live transcript window](#live-transcript-window). First use
+   prompts
    for microphone and System Audio Recording permissions. While recording, the
    icon turns red with a running elapsed counter, and macOS shows the purple
    recording indicator.
@@ -68,6 +70,40 @@ on next launch (the filesystem is the queue: a session with `meta.json` but no
 The engine sits behind a small protocol; a Whisper engine (WhisperKit
 large-v3-turbo) is planned as the fallback / re-transcription option.
 
+## Live transcript window
+
+A window with Start/Stop and the conversation appearing as it happens:
+
+```sh
+quill run --window        # open it at launch
+```
+
+Or **feather → Show live transcript** (⌘L) any time. Closing the window does
+not stop recording — quill stays an `.accessory` app with no Dock icon, and the
+window is just a surface you open when you want it.
+
+Both tracks are transcribed live, so you see `me` and `them` interleaved with
+the same labels the canonical transcript uses. Text that the recognizer has
+committed to is shown normally; the in-flight guess at the end of each speaker's
+turn is **dimmed**, because it will change.
+
+Live transcription is a **tee on the capture path, never a dependency**.
+Recording does not wait for it, buffers that arrive while its models load are
+dropped, and if it fails the window says so while recording carries on. Three
+things follow from that, worth knowing:
+
+- **The live text is thrown away.** `transcript.json` still comes from the
+  offline pass after you stop, which sees whole files, aligns both tracks on one
+  clock, and is more accurate. The window is for watching, not for keeping.
+- **Live lines are in arrival order**, not strict speech order. Two people
+  talking at once can interleave slightly wrong on screen. The file gets it
+  right.
+- **It costs real compute** — two sliding-window recognizers for the duration of
+  the meeting. Unnoticeable on an M-series desktop, worth knowing on battery.
+
+It reuses the Parakeet models already downloaded for offline transcription: no
+second model, no extra dependency.
+
 ## Config
 
 Optional, at `~/.config/quill/config.json`:
@@ -98,6 +134,7 @@ Optional, at `~/.config/quill/config.json`:
 
 ```sh
 quill                        # run the menu-bar daemon (^C to quit)
+quill run --window           # ...and open the live transcript window
 quill run --out <dir>        # custom recordings root (default ~/Recordings)
 quill doctor                 # check permissions, recordings folder, models
 quill install --launch-at-login
@@ -111,8 +148,10 @@ quill install --uninstall
   system audio capture via a private aggregate device
 - **AVAudioEngine** — mic capture
 - **AVAudioFile** — streaming AAC encode into CAF
-- **FluidAudio / Parakeet** — on-device Core ML transcription
-- **NSStatusItem** — the whole UI
+- **FluidAudio / Parakeet** — on-device Core ML transcription, offline plus
+  sliding-window streaming for the live view
+- **NSStatusItem + SwiftUI** — menu bar, and an optional window hosted in an
+  `NSHostingView` (no app bundle, so no SwiftUI `App` lifecycle)
 
 ## Gotchas
 

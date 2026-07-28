@@ -39,6 +39,10 @@ final class SystemAudioRecorder {
     /// used to offset-align the two tracks' transcript timestamps.
     private(set) var firstBufferAt: Date?
 
+    /// Optional tee for live transcription. Called from the IO proc, so it must
+    /// return immediately and must not retain the buffer.
+    var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
+
     /// Start capturing system audio, encoding AAC into `url` (use a .caf
     /// extension — CAF needs no finalization pass, so a crash mid-meeting
     /// loses nothing already written).
@@ -144,6 +148,7 @@ final class SystemAudioRecorder {
                 bufferListNoCopy: inInputData,
                 deallocator: nil
             ) else { return }
+            self.onBuffer?(buffer)
             do {
                 try file.write(from: buffer)
             } catch {
