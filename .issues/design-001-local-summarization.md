@@ -58,11 +58,19 @@ half. Exceeding the window throws rather than truncating; there is no overflow
 strategy to opt into [3](https://zats.io/blog/making-the-most-of-apple-foundation-models-context-window/).
 
 Feeding `transcript.md` directly is additionally wasteful. `ParakeetEngine`
-breaks a segment at every sentence-ending token, so an hour produces several
-hundred segments, each rendered with a `**[12:34] them:** ` prefix — on the
-order of 5,000 tokens of pure scaffolding, nearly a full macOS 26 context
-window spent on formatting. The summarizer must read `transcript.json` and
-re-render compactly: speaker label only on change, no per-segment timestamps.
+breaks a segment at every sentence-ending token, so an hour produces roughly
+700 segments, each rendered with an 18-character `**[12:34] them:** ` prefix:
+about 13,000 characters, or **~3,800 tokens of pure scaffolding** — most of a
+macOS 26 context window spent on formatting. The summarizer reads
+`transcript.json` and re-renders compactly, speaker label only on change and no
+per-segment timestamps, recovering **~3,400 of those tokens**.
+
+As a share of *total* characters the saving is more modest — 18% at realistic
+speaker run lengths, 14% when speakers strictly alternate — because the spoken
+words dominate either way. The scaffolding figure is the one the design rests
+on, and both are pinned by tests in
+`Tests/quillTests/TranscriptCompactorTests.swift` so the premise can't rot
+silently.
 
 Map-reduce is therefore mandatory, not an optimization
 [4](https://www.f22labs.com/blogs/map-reduce-for-large-document-summarization-with-llms/):

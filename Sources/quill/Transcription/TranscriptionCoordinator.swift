@@ -230,8 +230,9 @@ private struct SessionMeta {
 }
 
 /// Canonical transcript. Property names are the JSON schema — this struct
-/// exists to be serialized.
-private struct Transcript: Codable {
+/// exists to be serialized. Internal rather than private because the
+/// summarization pass reads it back.
+struct Transcript: Codable {
     struct Segment: Codable {
         let speaker: String
         let start_ms: Int
@@ -243,6 +244,14 @@ private struct Transcript: Codable {
     let model: String
     let created_at: String
     let segments: [Segment]
+
+    /// Read back a written transcript. The summarization pass reads
+    /// transcript.json rather than transcript.md — the markdown spends a large
+    /// fraction of its tokens on per-segment speaker and timestamp prefixes.
+    static func read(from dir: URL) throws -> Transcript {
+        let url = dir.appendingPathComponent("transcript.json")
+        return try JSONDecoder().decode(Transcript.self, from: Data(contentsOf: url))
+    }
 
     /// Write transcript.json and render transcript.md. Both writes are atomic
     /// (temp file + rename), so a partially written transcript never exists on
