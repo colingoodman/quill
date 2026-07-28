@@ -105,6 +105,35 @@ struct MeetingNotes: Codable, Equatable {
     }
 }
 
+/// How much of a context window is left for transcript once the instructions
+/// and the model's own answer are accounted for.
+///
+/// Pure integer arithmetic, deliberately outside the macOS 26 gate: it has
+/// nothing to do with FoundationModels and everything to do with whether a
+/// chunk will fit.
+enum SummarizationBudget {
+    /// Reserved for the model's answer. Guided generation keeps output small,
+    /// but the window is input *plus* output.
+    static let reservedOutputTokens = 900
+    /// Headroom for the schema the framework injects, and for drift between the
+    /// calibration sample and the real chunk.
+    static let safetyTokens = 200
+    /// Smallest transcript slice worth asking about. Below this, chunks are too
+    /// small to carry an exchange and the map step degenerates.
+    static let minimumTokens = 400
+
+    static func resolve(contextSize: Int, instructionTokens: Int) throws -> Int {
+        let overhead = reservedOutputTokens + safetyTokens + instructionTokens
+        let budget = contextSize - overhead
+        guard budget > minimumTokens else {
+            throw SummarizationError.permanent(
+                "context window \(contextSize) too small after \(overhead) tokens of overhead"
+            )
+        }
+        return budget
+    }
+}
+
 /// Why a summarization attempt stopped, and whether trying again could help.
 ///
 /// The distinction drives the queue: a retryable failure leaves the session

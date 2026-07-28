@@ -116,6 +116,22 @@ Built-ins: `default`, `standup`, `one-on-one`, `interview`, `sales`. Edit any
 written file to change the shape of your notes; `--write` never clobbers your
 edits. Select one with `summarization.template`.
 
+### Re-running notes
+
+`quill summarize <session-dir>` runs the same pipeline against a session that
+already has a `transcript.json`, so you can try a different template — or a
+different prompt — in seconds without recording anything:
+
+```sh
+quill summarize ~/Recordings/2026.07.28-1400 --template standup --print
+quill summarize ~/Recordings/2026.07.28-1400 --force   # replace summary.json
+```
+
+`--print` writes nothing and sends the notes to stdout (progress goes to
+stderr, so piping is clean). It ignores `summarization.enabled` — asking
+explicitly is consent enough. This is also the quickest way to see whether the
+model is reachable at all: it exits non-zero with the reason if not.
+
 ## Config
 
 Optional, at `~/.config/quill/config.json`:
@@ -162,6 +178,8 @@ quill run --out <dir>        # custom recordings root (default ~/Recordings)
 quill doctor                 # check permissions, recordings folder, models
 quill templates              # list summary templates
 quill templates --write      # write the built-ins out to edit
+quill summarize <dir>        # (re)write notes for one session
+quill summarize <dir> --template standup --print
 quill install --launch-at-login
 quill install --uninstall
 ```

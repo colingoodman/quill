@@ -21,13 +21,6 @@ actor AppleFoundationEngine: SummarizationEngine {
     nonisolated let name = "apple-foundation"
     nonisolated let model = "system-language-model"
 
-    /// Reserved for the model's own answer inside the shared window. Guided
-    /// generation keeps output small, but the window is input *plus* output.
-    private static let reservedOutputTokens = 900
-    /// Headroom for the schema the framework injects and for tokenizer drift
-    /// between our calibration sample and the real chunk.
-    private static let safetyTokens = 200
-
     /// Held only between prepare() and release(). Sessions are created per
     /// call, never cached — see `summarize`.
     private var languageModel: SystemLanguageModel?
@@ -144,7 +137,7 @@ actor AppleFoundationEngine: SummarizationEngine {
                     generating: ChunkFindings.self,
                     options: GenerationOptions(
                         temperature: 0.2,
-                        maximumResponseTokens: Self.reservedOutputTokens
+                        maximumResponseTokens: SummarizationBudget.reservedOutputTokens
                     )
                 )
                 findings.append((chunk, response.content))
@@ -218,20 +211,14 @@ actor AppleFoundationEngine: SummarizationEngine {
     // MARK: -
 
     private func budget(for instructions: String, model: SystemLanguageModel) async throws -> Int {
-        var overhead = Self.reservedOutputTokens + Self.safetyTokens
-        if #available(macOS 26.4, *) {
-            overhead += (try? await model.tokenCount(for: Instructions(instructions)))
-                ?? Self.estimated(instructions)
-        } else {
-            overhead += Self.estimated(instructions)
+        var instructionTokens = Self.estimated(instructions)
+        if #available(macOS 26.4, *),
+           let counted = try? await model.tokenCount(for: Instructions(instructions)) {
+            instructionTokens = counted
         }
-        let budget = model.contextSize - overhead
-        guard budget > 400 else {
-            throw SummarizationError.permanent(
-                "context window \(model.contextSize) too small after \(overhead) tokens of overhead"
-            )
-        }
-        return budget
+        return try SummarizationBudget.resolve(
+            contextSize: model.contextSize, instructionTokens: instructionTokens
+        )
     }
 
     /// Chunk, then check the assembled chunks against the real tokenizer and
@@ -310,7 +297,7 @@ actor AppleFoundationEngine: SummarizationEngine {
                 generating: Narrative.self,
                 options: GenerationOptions(
                     temperature: 0.4,
-                    maximumResponseTokens: Self.reservedOutputTokens
+                    maximumResponseTokens: SummarizationBudget.reservedOutputTokens
                 )
             )
             log("reduce: \(response.content.sections.count) section(s)")
@@ -392,7 +379,7 @@ actor AppleFoundationEngine: SummarizationEngine {
     /// Translate framework errors into the queue's retry policy. Getting this
     /// mapping wrong is how a session either retries forever or is dropped on a
     /// condition that would have cleared on its own.
-    private static func map(_ error: LanguageModelSession.GenerationError) -> SummarizationError {
+    static func map(_ error: LanguageModelSession.GenerationError) -> SummarizationError {
         switch error {
         case .rateLimited:
             // Background process on battery. Clears on power, or next drain.
