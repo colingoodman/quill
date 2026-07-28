@@ -251,4 +251,115 @@ enum NotesMerger {
     static func mergeStrings(_ items: [(String, Int?)]) -> [String] {
         merge(items, text: \.0, at: \.1, rebuild: { ($0, $1) }).map(\.0)
     }
+
+    /// Words too common to identify an utterance.
+    private static let stopwords: Set<String> = [
+        "a", "an", "the", "and", "or", "but", "to", "of", "in", "on", "for", "with",
+        "at", "by", "from", "is", "are", "was", "were", "be", "been", "will", "would",
+        "can", "could", "should", "that", "this", "it", "they", "we", "i", "you", "he",
+        "she", "do", "does", "did", "have", "has", "had", "not", "no", "so", "if",
+        "then", "than", "as", "about", "into", "up", "out", "s", "t", "our", "their",
+        "them", "me", "my", "your", "there", "here", "what", "when", "who", "how",
+    ]
+
+    static func contentTokens(_ text: String) -> Set<String> {
+        Set(normalize(text).split(separator: " ").map(String.init).filter {
+            $0.count > 2 && !stopwords.contains($0)
+        })
+    }
+
+    /// Find when a claim was actually said, by matching its content words back
+    /// against the transcript.
+    ///
+    /// The model paraphrases, so this is overlap scoring rather than search.
+    /// Returns nil when nothing matches well enough — the renderer then omits
+    /// the timestamp, which is the honest outcome. Stamping an item with the
+    /// start of the chunk it came from looked precise and was not: a chunk is
+    /// ~13 minutes of speech, so a short meeting is one chunk and every item
+    /// claimed to happen at 0:00.
+    static func locate(
+        _ text: String,
+        in segments: [Transcript.Segment],
+        between startMs: Int,
+        and endMs: Int,
+        minimumOverlap: Double = 0.34,
+        minimumShared: Int = 2
+    ) -> Int? {
+        let needle = contentTokens(text)
+        // Below two content words there is nothing distinctive to match on.
+        guard needle.count >= 2 else { return nil }
+
+        var best: (score: Double, at: Int)?
+        for segment in segments where segment.start_ms >= startMs && segment.start_ms <= endMs {
+            let candidate = contentTokens(segment.text)
+            guard !candidate.isEmpty else { continue }
+            let shared = needle.intersection(candidate).count
+            // A ratio alone is too weak for a short claim: three words sharing
+            // one generic one ("Agreed on a new supplier") would clear 0.33.
+            guard shared >= minimumShared else { continue }
+            let score = Double(shared) / Double(needle.count)
+            guard score >= minimumOverlap else { continue }
+            // Ties go to the earliest utterance: a point restated later was
+            // first made where it was first made.
+            if best == nil || score > best!.score {
+                best = (score, segment.start_ms)
+            }
+        }
+        return best?.at
+    }
+
+    /// Whether a claim is traceable to something actually said.
+    ///
+    /// The narrative pass fabricates when given thin input — asked to fill a
+    /// section from two extracted points it produced five bullets, four of them
+    /// invented corporate filler ("agreed to continue to monitor the migration
+    /// process"). Prompting for traceability did not stop it, so support is
+    /// checked here instead.
+    ///
+    /// The cost is a bias toward extractive output: a bullet that correctly
+    /// synthesises across three separate utterances may not overlap any single
+    /// one enough to survive. That is the right trade at this model size, where
+    /// synthesis is the weakest thing it does.
+    /// Stricter than timestamp matching: a mislocated timestamp is a small
+    /// error, while an unsupported bullet is a fabricated claim.
+    static func isSupported(
+        _ text: String,
+        by segments: [Transcript.Segment],
+        minimumOverlap: Double = 0.5
+    ) -> Bool {
+        locate(
+            text, in: segments, between: 0, and: .max,
+            minimumOverlap: minimumOverlap, minimumShared: 2
+        ) != nil
+    }
+
+    /// Whether a line is actually a question. The model happily returns
+    /// statements when asked for open questions, and "Ignored previous
+    /// instructions." is not an open question.
+    static func isQuestion(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        if trimmed.hasSuffix("?") { return true }
+        let opener = normalize(trimmed).split(separator: " ").first.map(String.init) ?? ""
+        return [
+            "who", "what", "when", "where", "why", "how", "which", "whether",
+            "will", "can", "should", "could", "does", "do", "is", "are", "if",
+        ].contains(opener)
+    }
+
+    /// Drop items that restate something already present in `others`.
+    ///
+    /// The model routinely reports the same commitment as both a decision and an
+    /// action item; the action item is the more useful record because it carries
+    /// an owner, so decisions lose the tie.
+    static func removing<T, U>(
+        _ items: [T],
+        duplicatedIn others: [U],
+        text: (T) -> String,
+        otherText: (U) -> String
+    ) -> [T] {
+        items.filter { item in
+            !others.contains { isDuplicate(otherText($0), text(item)) }
+        }
+    }
 }

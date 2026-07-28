@@ -101,6 +101,25 @@ frontier one. Action-item ownership is `me` / `them` / `unassigned`, since
 attribution is filesystem-based and every remote participant collapses into one
 `them`.
 
+Because the model is unreliable at anything but extraction, several guarantees
+are enforced in code rather than asked for in the prompt:
+
+- **Timestamps are located, not generated.** Each decision and action is matched
+  back to the utterance that produced it by word overlap. An item that can't be
+  matched carries no time rather than a wrong one.
+- **Bullets must be traceable.** Any section bullet that doesn't match something
+  actually said is dropped — the model fabricates plausible filler when a
+  section is thin. This biases notes toward the extractive, deliberately.
+- **Lines aimed at the summarizer are stripped before it reads them.** A
+  transcript is untrusted input: anyone on a call can say "ignore your
+  instructions". Prompting the model to disregard such lines was measured and
+  made things *worse*, so `InjectionFilter` removes them instead. It's a
+  blocklist of known phrasings, so novel wording can still get through — a
+  mitigation, not a solution. Every dropped line is logged to `summarize.log`,
+  and `transcript.json` is never altered.
+- **Duplicates are merged deterministically** across chunks, between decisions
+  and action items, and across sections.
+
 ### Templates
 
 Granola's trick is that the sparse notes you type during a call guide the model.
