@@ -9,6 +9,29 @@ struct Failure: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+/// Run an async body from a synchronous command, blocking until it finishes.
+///
+/// The root command must stay synchronous — see `Quill` — so a command needing
+/// async does the bridging itself. Safe here because summarization touches
+/// neither AppKit nor the main actor: the detached task runs on the cooperative
+/// pool while the main thread waits. The semaphore orders the write before the
+/// read, which is what makes the unchecked storage sound.
+func runBlocking<T: Sendable>(_ body: @escaping @Sendable () async throws -> T) throws -> T {
+    let semaphore = DispatchSemaphore(value: 0)
+    nonisolated(unsafe) var outcome: Result<T, Error>?
+    Task.detached {
+        do {
+            outcome = .success(try await body())
+        } catch {
+            outcome = .failure(error)
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    guard let outcome else { throw Failure("summarization produced no result") }
+    return try outcome.get()
+}
+
 /// Summarize one session on demand.
 ///
 /// The daemon summarizes automatically, but that is a slow loop to iterate in:
@@ -20,7 +43,7 @@ struct Failure: Error, CustomStringConvertible {
 /// Deliberately ignores `summarization.enabled`: asking for notes explicitly is
 /// consent enough, and requiring a config edit before you can try the feature
 /// once would be a silly gate.
-struct Summarize: AsyncParsableCommand {
+struct Summarize: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Write notes for a session that already has a transcript."
     )
@@ -37,7 +60,11 @@ struct Summarize: AsyncParsableCommand {
     @Flag(name: .long, help: "Re-summarize even if summary.json already exists.")
     var force: Bool = false
 
-    func run() async throws {
+    func run() throws {
+        try runBlocking { try await self.execute() }
+    }
+
+    private func execute() async throws {
         let dir = URL(
             fileURLWithPath: (directory as NSString).expandingTildeInPath,
             isDirectory: true
