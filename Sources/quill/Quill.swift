@@ -2,12 +2,24 @@ import AppKit
 import ArgumentParser
 import Foundation
 
+/// The root command is deliberately synchronous.
+///
+/// Making it an `AsyncParsableCommand` (to support `quill summarize`) broke the
+/// daemon twice over. ArgumentParser then dispatches subcommands from an async
+/// task, so `Run`'s `MainActor.assumeIsolated` trapped; and hopping with
+/// `MainActor.run` instead put `NSApp.run()` inside a main-queue work item,
+/// which — because that queue is serial — starved everything else queued on it:
+/// the SIGINT source, every `Task { @MainActor }` menu-bar update, and
+/// `MicRecorder`'s silent-mic fallback.
+///
+/// `Summarize` bridges to async itself via `runBlocking` instead. Only that one
+/// command pays for it.
 @main
 struct Quill: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "quill",
-        abstract: "Local meeting recorder + transcriber. Records mic and system audio as two tracks, then transcribes on-device.",
-        subcommands: [Run.self, Doctor.self, Install.self],
+        abstract: "Local meeting recorder + transcriber. Records mic and system audio as two tracks, then transcribes and summarizes on-device.",
+        subcommands: [Run.self, Doctor.self, Install.self, Templates.self, Summarize.self],
         defaultSubcommand: Run.self
     )
 }
@@ -25,8 +37,11 @@ struct Run: ParsableCommand {
     var window: Bool = false
 
     func run() throws {
-        // ArgumentParser invokes run() on the main thread; promote that fact
-        // to the type system so AppKit calls are cleanly isolated.
+        // ArgumentParser invokes run() on the main thread — true only while the
+        // root command is synchronous, which is why it must stay that way.
+        // Promote that fact to the type system so AppKit calls are cleanly
+        // isolated, and so NSApp.run() blocks the bare main thread rather than a
+        // main-queue work item.
         try MainActor.assumeIsolated { try runMain() }
     }
 
@@ -211,6 +226,8 @@ final class AppController {
             text = nil
         case .transcribing(let name, let queued):
             text = queued > 0 ? "transcribing \(name) · \(queued) queued" : "transcribing \(name)"
+        case .summarizing(let name):
+            text = "writing notes · \(name)"
         case .failed(let name):
             text = "transcription failed · \(name)"
         }

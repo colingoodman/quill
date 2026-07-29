@@ -1,0 +1,13 @@
+{
+  "started" : "2026-07-28T14:00:00Z",
+  "ended" : "2026-07-28T14:11:00Z",
+  "duration_seconds" : 660,
+  "files" : {
+    "mic" : "mic.caf",
+    "system" : "system.caf"
+  },
+  "start_offset_ms" : {
+    "mic" : 0,
+    "system" : 120
+  }
+}

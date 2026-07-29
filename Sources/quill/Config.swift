@@ -5,14 +5,16 @@ import Foundation
 ///     {
 ///       "recordings_dir": "~/Recordings",
 ///       "transcription": { "enabled": true, "engine": "parakeet" },
+///       "summarization": { "enabled": true, "template": "default" },
 ///       "mic_voice_processing": true,
 ///       "on_stop": "my-hook"
 ///     }
 ///
 /// Resolution order for the recordings root: --out flag > config file >
 /// ~/Recordings. `on_stop` is a shell command spawned with the session
-/// directory as its argument — after the transcript is written, or right
-/// after recording when transcription is disabled.
+/// directory as its argument once the session is finished — after the notes
+/// when summarization is on, after the transcript when it is not, or right
+/// after recording when transcription is disabled. At most once per session.
 enum Config {
     static let path = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".config/quill/config.json")
@@ -26,8 +28,7 @@ enum Config {
         return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath, isDirectory: true)
     }
 
-    /// Shell command to spawn after each session's transcript is written (or
-    /// after recording, if transcription is disabled), or nil.
+    /// Shell command to spawn once a session is finished, or nil.
     static func onStop() -> String? {
         guard let cmd = load()?["on_stop"] as? String, !cmd.isEmpty else { return nil }
         return cmd
@@ -46,6 +47,30 @@ enum Config {
 
     private static func transcription() -> [String: Any]? {
         load()?["transcription"] as? [String: Any]
+    }
+
+    /// Whether finished transcripts are summarized into Granola-style notes.
+    /// Default off: it needs macOS 26 with Apple Intelligence enabled, and a
+    /// feature that silently does nothing is worse than one you switch on.
+    static func summarizationEnabled() -> Bool {
+        summarization()?["enabled"] as? Bool ?? false
+    }
+
+    /// Template name resolved against ~/.config/quill/templates/<name>.md, then
+    /// the builtins. Its headings are the sections the model fills.
+    static func summarizationTemplate() -> String {
+        summarization()?["template"] as? String ?? Template.fallbackName
+    }
+
+    /// Whether to title notes from the overlapping calendar event. Default off:
+    /// switching it on prompts for access to every event in the calendar, which
+    /// is a far broader grant than recording audio the user started by hand.
+    static func calendarTitles() -> Bool {
+        summarization()?["calendar_titles"] as? Bool ?? false
+    }
+
+    private static func summarization() -> [String: Any]? {
+        load()?["summarization"] as? [String: Any]
     }
 
     /// Apple voice processing (acoustic echo cancellation) on the mic, so
