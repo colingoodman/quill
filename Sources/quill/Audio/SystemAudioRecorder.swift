@@ -39,6 +39,26 @@ final class SystemAudioRecorder {
     /// used to offset-align the two tracks' transcript timestamps.
     private(set) var firstBufferAt: Date?
 
+    /// Largest absolute sample seen. Stays exactly 0 when the tap is running but
+    /// not permitted to hear anything, which is the failure this whole watchdog
+    /// exists to catch.
+    private(set) var peak: Float = 0
+
+    /// Fired once, on the main queue, when the tap has delivered nothing but
+    /// digital silence for `silenceGrace`. Without this a denied permission is
+    /// invisible until the transcript comes back with one speaker in it — a
+    /// whole meeting too late to do anything about.
+    var onProlongedSilence: (@Sendable () -> Void)?
+
+    /// Long enough that starting quill before the call connects doesn't cry
+    /// wolf, short enough to fix the permission and restart while the meeting is
+    /// still young.
+    static let silenceGrace: TimeInterval = 20
+
+    private var framesSeen: Int = 0
+    private var sampleRate: Double = 48_000
+    private var silenceReported = false
+
     /// Start capturing system audio, encoding AAC into `url` (use a .caf
     /// extension — CAF needs no finalization pass, so a crash mid-meeting
     /// loses nothing already written).
@@ -55,8 +75,12 @@ final class SystemAudioRecorder {
         guard status == noErr else { throw RecorderError.tapCreationFailed(status) }
         tapID = newTapID
 
+        peak = 0
+        framesSeen = 0
+        silenceReported = false
         do {
             let format = try tapStreamFormat()
+            sampleRate = format.sampleRate
             try createAggregateDevice(tapUUID: description.uuid)
             file = try makeFile(url: url, format: format)
             try installIOProc(format: format)
@@ -144,6 +168,7 @@ final class SystemAudioRecorder {
                 bufferListNoCopy: inInputData,
                 deallocator: nil
             ) else { return }
+            self.observe(buffer)
             do {
                 try file.write(from: buffer)
             } catch {
@@ -154,6 +179,47 @@ final class SystemAudioRecorder {
 
         status = AudioDeviceStart(aggregateID, procID)
         guard status == noErr else { throw RecorderError.deviceStartFailed(status) }
+    }
+
+    /// Track the loudest sample and raise the alarm if the tap only ever hands
+    /// us zeros. Runs on the tap's IO queue, so it stays a single pass with no
+    /// allocation.
+    private func observe(_ buffer: AVAudioPCMBuffer) {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return }
+
+        var localPeak: Float = 0
+        if let channels = buffer.floatChannelData {
+            let stride = buffer.stride
+            for channel in 0..<Int(buffer.format.channelCount) {
+                let samples = channels[channel]
+                for frame in 0..<frames {
+                    localPeak = max(localPeak, abs(samples[frame * stride]))
+                }
+            }
+        } else if let channels = buffer.int16ChannelData {
+            let stride = buffer.stride
+            for channel in 0..<Int(buffer.format.channelCount) {
+                let samples = channels[channel]
+                for frame in 0..<frames {
+                    localPeak = max(localPeak, abs(Float(samples[frame * stride])) / 32_768)
+                }
+            }
+        } else {
+            // Unknown sample format: don't guess, and don't claim silence.
+            silenceReported = true
+            return
+        }
+
+        if localPeak > peak { peak = localPeak }
+        framesSeen += frames
+
+        guard !silenceReported, peak == 0 else { return }
+        if Double(framesSeen) / sampleRate >= Self.silenceGrace {
+            silenceReported = true
+            let notify = onProlongedSilence
+            DispatchQueue.main.async { notify?() }
+        }
     }
 
     private func cleanup() {

@@ -118,6 +118,12 @@ final class AppController {
     private func startSession() {
         do {
             let newSession = try RecordingSession(root: root)
+            // Wired before start(): a denied system-audio permission produces no
+            // error and no prompt, only silence, so the watchdog is the only
+            // thing that will ever tell the user.
+            newSession.onSystemSilence = {
+                MainActor.assumeIsolated { Self.warnSystemSilent() }
+            }
             try newSession.start()
             session = newSession
             FileHandle.standardError.write(Data("● recording → \(newSession.dir.path)\n".utf8))
@@ -168,6 +174,16 @@ final class AppController {
             recording: true,
             elapsed: Self.format(Date().timeIntervalSince(session.startedAt))
         )
+    }
+
+    /// The system tap is running but hearing nothing. There is no OS prompt for
+    /// this and no error to catch, so say it loudly and say what to do — the
+    /// alternative is finding out from a one-sided transcript after the meeting.
+    private static func warnSystemSilent() {
+        let message = "system audio is silent — grant Screen & System Audio Recording "
+            + "to whatever launched quill, then restart it"
+        FileHandle.standardError.write(Data("warning: \(message)\n".utf8))
+        notifyUser(title: "quill — system audio is silent", body: message)
     }
 
     private func openFolder() {

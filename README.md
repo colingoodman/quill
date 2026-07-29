@@ -23,12 +23,14 @@ transcription speed.
 
 ## How to use
 
-1. **Run it** (`quill` in a terminal, or the LaunchAgent).
-2. **Click the feather in the menu bar → Start recording.** First use prompts
-   for microphone and System Audio Recording permissions. While recording, the
-   icon turns red with a running elapsed counter, and macOS shows the purple
-   recording indicator.
-3. **Click → Stop recording** when the meeting ends. Transcription starts
+1. **Grant Screen & System Audio Recording first** — see
+   [System audio permission](#system-audio-permission). This does not prompt,
+   and without it the system track records silence.
+2. **Run it** (`quill` in a terminal, or the LaunchAgent).
+3. **Click the feather in the menu bar → Start recording.** First use prompts
+   for the microphone. While recording, the icon turns red with a running
+   elapsed counter, and macOS shows the purple recording indicator.
+4. **Click → Stop recording** when the meeting ends. Transcription starts
    automatically (the menu shows progress); a notification fires when the
    transcript is ready.
 
@@ -42,6 +44,39 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 | `transcript.json` | canonical transcript — engine provenance + timed, speaker-tagged segments |
 | `transcript.md` | the same transcript rendered for reading |
 | `transcribe.log` | transcription progress/errors for this session |
+
+`meta.json` also carries `peak_level` per track, and a `warnings` array when a
+track captured nothing but silence.
+
+## System audio permission
+
+**The microphone prompts. System audio does not.** `AudioHardwareCreateProcessTap`
+succeeds without the permission and then delivers digital silence forever — no
+prompt, no error, no clue. If you have never granted it, `system.caf` will be
+silence and your transcript will contain only your own half of the conversation.
+
+macOS attributes the permission to the **responsible process**, which for a
+plain binary run from a shell is the *terminal app*, not quill. So:
+
+- **Running from a terminal:** System Settings → Privacy & Security → Screen &
+  System Audio Recording → enable your terminal (Terminal, iTerm, Ghostty, …).
+  **Then restart the terminal** — TCC changes do not reach already-running
+  processes.
+- **Running as the LaunchAgent:** quill is its own responsible process, so grant
+  it to `quill` itself. This is the more durable arrangement.
+
+quill now notices on its own: if the tap delivers nothing but zeros for 20
+seconds it fires a notification, and `meta.json` records `peak_level` for both
+tracks plus a `warnings` entry. Verify a setup in fifteen seconds — play music,
+record briefly, then:
+
+```sh
+python3 -c "import json,sys; m=json.load(open(sys.argv[1]));
+print(m['peak_level']); print(m.get('warnings','no warnings'))" \
+  ~/Recordings/<session>/meta.json
+```
+
+A `system` peak of `0` means the permission still is not in effect.
 
 Two tracks on purpose: speech models do better on clean single-source audio,
 and mic-vs-system is free two-party diarization — `me` vs `them` with no
@@ -119,8 +154,9 @@ quill install --uninstall
 - A global tap records *everything* the Mac plays — notification dings,
   music, all of it. Don't play Spotify during meetings (or ask for a
   per-process picker if it bothers you).
-- If recordings come out silent, check System Settings → Privacy & Security →
-  Screen & System Audio Recording.
+- If the system track comes out silent, the permission is missing and nothing
+  will have told you — see [System audio permission](#system-audio-permission).
+  A `peak_level.system` of `0` in `meta.json` is the tell.
 - Parakeet v2 is English-only. Other languages will come with the Whisper
   engine.
 - The binary embeds its Info.plist (`__TEXT,__info_plist`) so TCC can

@@ -35,6 +35,10 @@ final class MicRecorder: @unchecked Sendable {
     /// used to offset-align the two tracks' transcript timestamps.
     private(set) var firstBufferAt: Date?
 
+    /// Largest absolute sample across the whole session, so a silent mic is
+    /// recorded as such in meta.json rather than discovered later.
+    private(set) var peak: Float = 0
+
     // Liveness check state (voice-processing path only). Written from the tap
     // callback, read on main when deciding to fall back.
     private var livenessFrames = 0
@@ -155,6 +159,12 @@ final class MicRecorder: @unchecked Sendable {
             guard let self, let file = self.file else { return }
             if self.firstBufferAt == nil { self.firstBufferAt = Date() }
 
+            if let data = buffer.floatChannelData?[0] {
+                for i in 0..<Int(buffer.frameLength) {
+                    self.peak = max(self.peak, abs(data[i]))
+                }
+            }
+
             if !self.livenessSettled {
                 let frames = Int(buffer.frameLength)
                 if let data = buffer.floatChannelData?[0] {
@@ -199,6 +209,11 @@ final class MicRecorder: @unchecked Sendable {
             ) else { return }
             do {
                 try converter.convert(to: mono, from: buffer)
+                if let data = mono.floatChannelData?[0] {
+                    for i in 0..<Int(mono.frameLength) {
+                        self.peak = max(self.peak, abs(data[i]))
+                    }
+                }
                 try file.write(from: mono)
             } catch {
                 FileHandle.standardError.write(Data("mic track write failed: \(error)\n".utf8))
@@ -218,6 +233,7 @@ final class MicRecorder: @unchecked Sendable {
         engine.inputNode.removeTap(onBus: 0)
         file = nil
         firstBufferAt = nil
+        peak = 0
         if let url {
             try? FileManager.default.removeItem(at: url)
         }
