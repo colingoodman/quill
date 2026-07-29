@@ -21,6 +21,9 @@ struct Run: ParsableCommand {
     @Option(name: .long, help: "Recordings root directory (overrides the config file).")
     var out: String?
 
+    @Flag(name: .long, help: "Open the live transcript window at launch.")
+    var window: Bool = false
+
     func run() throws {
         // ArgumentParser invokes run() on the main thread; promote that fact
         // to the type system so AppKit calls are cleanly isolated.
@@ -44,6 +47,7 @@ struct Run: ParsableCommand {
         app.setActivationPolicy(.accessory)
 
         let controller = AppController(root: root)
+        if window { controller.showWindow() }
 
         let sigint = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigint.setEventHandler {
@@ -84,12 +88,23 @@ final class AppController {
     private var session: RecordingSession?
     private var ticker: Timer?
 
+    private let liveState = LiveTranscriptState()
+    private var window: TranscriptWindow?
+    private var live: LiveTranscriber?
+
     init(root: URL) {
         self.root = root
         menuBar.onToggle = { [weak self] in self?.toggle() }
         menuBar.onOpenFolder = { [weak self] in self?.openFolder() }
+        menuBar.onShowWindow = { [weak self] in self?.window?.show() }
         menuBar.onQuit = { [weak self] in self?.shutdown() }
         menuBar.update(recording: false, elapsed: nil)
+
+        window = TranscriptWindow(
+            state: liveState,
+            onToggle: { [weak self] in self?.toggle() },
+            onReveal: { [weak self] in self?.openFolder() }
+        )
 
         Task { [transcription, root] in
             await transcription.setStatusHandler { status in
@@ -100,6 +115,9 @@ final class AppController {
             await transcription.resumePending(root: root)
         }
     }
+
+    /// Bring the live transcript window forward.
+    func showWindow() { window?.show() }
 
     /// Stop any live session cleanly (finalizing files) and exit.
     func shutdown() {
@@ -116,6 +134,9 @@ final class AppController {
     }
 
     private func startSession() {
+        // The live transcriber is a tee on the capture path, so recording never
+        // waits for its models to load — buffers arriving first are dropped.
+        let transcriber = LiveTranscriber()
         do {
             let newSession = try RecordingSession(root: root)
             // Wired before start(): a denied system-audio permission produces no
@@ -124,8 +145,9 @@ final class AppController {
             newSession.onSystemSilence = {
                 MainActor.assumeIsolated { Self.warnSystemSilent() }
             }
-            try newSession.start()
+            try newSession.start(live: transcriber)
             session = newSession
+            live = transcriber
             FileHandle.standardError.write(Data("● recording → \(newSession.dir.path)\n".utf8))
         } catch {
             FileHandle.standardError.write(Data("recording start failed: \(error)\n".utf8))
@@ -133,9 +155,29 @@ final class AppController {
             return
         }
 
+        liveState.reset()
+        liveState.isRecording = true
+        liveState.status = "loading speech model…"
         menuBar.update(recording: true, elapsed: "0:00")
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
+        }
+
+        // Capture the state object rather than self: it is a @MainActor class,
+        // so it is Sendable, and this closure is called from the recognizer.
+        let state = liveState
+        Task {
+            do {
+                try await transcriber.start { line in
+                    Task { @MainActor in state.apply(line) }
+                }
+                await MainActor.run { state.status = nil }
+            } catch {
+                await MainActor.run { state.status = "live transcript unavailable" }
+                FileHandle.standardError.write(Data(
+                    "live transcription unavailable: \(error)\n".utf8
+                ))
+            }
         }
     }
 
@@ -150,30 +192,39 @@ final class AppController {
         ticker?.invalidate()
         ticker = nil
         menuBar.update(recording: false, elapsed: nil)
+        liveState.isRecording = false
+        liveState.status = nil
+
+        if let live {
+            self.live = nil
+            Task { await live.stop() }
+        }
 
         let dir = session.dir
         Task { [transcription] in await transcription.enqueue(dir) }
     }
 
     private func showTranscription(_ status: TranscriptionCoordinator.Status) {
+        let text: String?
         switch status {
         case .idle:
-            menuBar.updateTranscription(nil)
+            text = nil
         case .transcribing(let name, let queued):
-            menuBar.updateTranscription(
-                queued > 0 ? "transcribing \(name) · \(queued) queued" : "transcribing \(name)"
-            )
+            text = queued > 0 ? "transcribing \(name) · \(queued) queued" : "transcribing \(name)"
         case .failed(let name):
-            menuBar.updateTranscription("transcription failed · \(name)")
+            text = "transcription failed · \(name)"
         }
+        menuBar.updateTranscription(text)
+        // Only borrow the window's status line when it isn't reporting on the
+        // live transcript itself.
+        if !liveState.isRecording { liveState.status = text }
     }
 
     private func tick() {
         guard let session else { return }
-        menuBar.update(
-            recording: true,
-            elapsed: Self.format(Date().timeIntervalSince(session.startedAt))
-        )
+        let elapsed = Self.format(Date().timeIntervalSince(session.startedAt))
+        menuBar.update(recording: true, elapsed: elapsed)
+        liveState.elapsed = elapsed
     }
 
     /// The system tap is running but hearing nothing. There is no OS prompt for

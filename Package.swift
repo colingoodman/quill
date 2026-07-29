@@ -28,6 +28,9 @@ let package = Package(
                 ]),
             ]
         ),
-        .testTarget(name: "quillTests", dependencies: ["quill"]),
+        .testTarget(
+            name: "quillTests",
+            dependencies: ["quill"]
+        ),
     ]
 )

@@ -39,6 +39,10 @@ final class SystemAudioRecorder {
     /// used to offset-align the two tracks' transcript timestamps.
     private(set) var firstBufferAt: Date?
 
+    /// Optional tee for live transcription. Called from the IO proc, so it must
+    /// return immediately and must not retain the buffer.
+    var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
+
     /// Largest absolute sample seen. Stays exactly 0 when the tap is running but
     /// not permitted to hear anything, which is the failure this whole watchdog
     /// exists to catch.
@@ -169,6 +173,7 @@ final class SystemAudioRecorder {
                 deallocator: nil
             ) else { return }
             self.observe(buffer)
+            self.onBuffer?(buffer)
             do {
                 try file.write(from: buffer)
             } catch {

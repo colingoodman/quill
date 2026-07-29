@@ -44,10 +44,19 @@ final class RecordingSession {
 
     /// Start both tracks. If the mic fails after the system tap started, the
     /// tap is torn down so we never run half a session silently.
-    func start() throws {
+    ///
+    /// `live` receives a copy of every captured buffer for on-the-fly
+    /// transcription. It is a tee, never a dependency: recording does not wait
+    /// for it, and buffers arriving before its models finish loading are simply
+    /// dropped.
+    func start(live: LiveTranscriber? = nil) throws {
         // Forwarded rather than wrapped: RecordingSession is not Sendable, so the
         // callback must not capture it.
         system.onProlongedSilence = onSystemSilence
+        if let live {
+            mic.onBuffer = { buffer in live.append(buffer, from: .me) }
+            system.onBuffer = { buffer in live.append(buffer, from: .them) }
+        }
         try system.start(writingTo: dir.appendingPathComponent("system.caf"))
         do {
             try mic.start(writingTo: dir.appendingPathComponent("mic.caf"))
@@ -59,6 +68,8 @@ final class RecordingSession {
 
     /// Stop both tracks and write meta.json.
     func stop() {
+        mic.onBuffer = nil
+        system.onBuffer = nil
         mic.stop()
         system.stop()
 
