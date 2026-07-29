@@ -104,12 +104,20 @@ enum DoctorReport {
     }
 
     /// There is no public API to query the system-audio-capture TCC state
-    /// without side effects, so all we can do is describe the flow.
+    /// without side effects, so all we can do is describe the flow — accurately.
+    ///
+    /// It does **not** prompt. `AudioHardwareCreateProcessTap` succeeds without
+    /// the permission and then delivers digital silence indefinitely, which is
+    /// how a real 21-minute meeting got recorded with only one side of the
+    /// conversation. Saying "will prompt on first recording" here is what let
+    /// that happen, so this now says the opposite.
     static func checkSystemAudio() -> Check {
         Check(
             name: "system audio",
-            status: .warn("state unknowable until first use — will prompt on first recording"),
-            remediation: "if recordings come out silent: System Settings → Privacy & Security → Screen & System Audio Recording"
+            status: .warn("cannot be checked up front — and it never prompts"),
+            remediation: "grant Screen & System Audio Recording to whatever launches quill "
+                + "(your terminal, or quill itself as a LaunchAgent) and restart it. "
+                + "quill warns after 20s of silence and records peak_level in meta.json"
         )
     }
 
