@@ -32,9 +32,22 @@ final class RecordingSession {
         dir = candidate
     }
 
+    /// Set this before `start()`. Called once on the main queue when the system
+    /// tap has gone `SystemAudioRecorder.silenceGrace` seconds without a single
+    /// nonzero sample — almost always a missing Screen & System Audio Recording
+    /// permission rather than a genuinely quiet call. Surfaced while the meeting
+    /// is still young enough to be worth fixing.
+    var onSystemSilence: (@Sendable () -> Void)?
+
+    /// Loudest sample captured on each track, available after `stop()`.
+    var peakLevels: (mic: Float, system: Float) { (mic.peak, system.peak) }
+
     /// Start both tracks. If the mic fails after the system tap started, the
     /// tap is torn down so we never run half a session silently.
     func start() throws {
+        // Forwarded rather than wrapped: RecordingSession is not Sendable, so the
+        // callback must not capture it.
+        system.onProlongedSilence = onSystemSilence
         try system.start(writingTo: dir.appendingPathComponent("system.caf"))
         do {
             try mic.start(writingTo: dir.appendingPathComponent("mic.caf"))
@@ -58,7 +71,22 @@ final class RecordingSession {
         let systemStart = system.firstBufferAt ?? startedAt
         let earliest = min(micStart, systemStart)
 
-        let meta: [String: Any] = [
+        // Recorded so the failure is visible in the session itself, not only in
+        // a notification that has already been dismissed.
+        var warnings: [String] = []
+        if system.peak == 0 {
+            warnings.append(
+                "system.caf contains only digital silence — the process tap ran but captured "
+                    + "nothing. Grant Screen & System Audio Recording to whatever launched quill "
+                    + "(the terminal app, if you started it from a shell), or install it as a "
+                    + "LaunchAgent so it is attributed to itself."
+            )
+        }
+        if mic.peak == 0 {
+            warnings.append("mic.caf contains only digital silence — check Microphone permission.")
+        }
+
+        var meta: [String: Any] = [
             "started": iso.string(from: startedAt),
             "ended": iso.string(from: ended),
             "duration_seconds": Int(ended.timeIntervalSince(startedAt)),
@@ -67,7 +95,17 @@ final class RecordingSession {
                 "mic": Int(micStart.timeIntervalSince(earliest) * 1000),
                 "system": Int(systemStart.timeIntervalSince(earliest) * 1000),
             ],
+            "peak_level": [
+                "mic": mic.peak,
+                "system": system.peak,
+            ],
         ]
+        if !warnings.isEmpty {
+            meta["warnings"] = warnings
+            for warning in warnings {
+                FileHandle.standardError.write(Data("warning: \(warning)\n".utf8))
+            }
+        }
         if let data = try? JSONSerialization.data(
             withJSONObject: meta,
             options: [.prettyPrinted, .sortedKeys]
