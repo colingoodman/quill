@@ -57,19 +57,35 @@ actor AppleFoundationEngine: SummarizationEngine {
     /// What one chunk yields. Counts are capped so a long passage cannot spend
     /// the whole output reserve, and `owner` is constrained by decoding rather
     /// than by asking politely.
+    /// One extracted item plus the only judgement the model is asked to make
+    /// about it. Constrained decoding on a two-value label is about the most
+    /// reliable thing a 3B model can do; deciding what to leave out is not.
+    @Generable
+    struct ExtractedItem {
+        @Guide(description: "The point itself, in the speakers' own terms")
+        var text: String
+
+        @Guide(
+            description: "'work' if this is about the work being done. 'social' for greetings, holidays, travel, flights, family, pets, weather, sport, hobbies, restaurants, and anything else colleagues say to each other that is not the work.",
+            .anyOf(["work", "social"])
+        )
+        var topic: String
+    }
+
     @Generable
     struct ChunkFindings {
         @Guide(description: "The substantive points discussed in this passage, in the speakers' own terms", .maximumCount(6))
-        var key_points: [String]
+        var key_points: [ExtractedItem]
 
         @Guide(description: "Only decisions actually settled in this passage. Empty if nothing was decided.", .maximumCount(4))
-        var decisions: [String]
+        var decisions: [ExtractedItem]
 
         @Guide(description: "Only tasks someone committed to. Empty if none.", .maximumCount(4))
         var action_items: [DraftActionItem]
 
         @Guide(description: "Questions raised in this passage and left unanswered. Empty if none.", .maximumCount(3))
-        var open_questions: [String]
+        var open_questions: [ExtractedItem]
+
     }
 
     @Generable
@@ -82,6 +98,12 @@ actor AppleFoundationEngine: SummarizationEngine {
             .anyOf(["me", "them", "unassigned"])
         )
         var owner: String
+
+        @Guide(
+            description: "'work' if this is a work task. 'social' for anything personal — holiday photos, dinner plans, lifts to the airport.",
+            .anyOf(["work", "social"])
+        )
+        var topic: String
     }
 
     /// The narrative pass. Sections only — decisions, actions and questions are
@@ -173,6 +195,17 @@ actor AppleFoundationEngine: SummarizationEngine {
             throw SummarizationError.permanent("every chunk failed extraction")
         }
 
+        let keepSocial = Config.includeSmallTalk()
+        var setAside = 0
+        /// Keep an item only if the model called it work — or if the user asked
+        /// for everything.
+        func isWork(_ topic: String) -> Bool {
+            if keepSocial { return true }
+            let work = topic.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "social"
+            if !work { setAside += 1 }
+            return work
+        }
+
         // Timestamps come from matching each claim back to the utterance that
         // produced it, never from the chunk it was extracted from and never from
         // the model. An unmatched claim carries no time rather than a wrong one.
@@ -181,7 +214,7 @@ actor AppleFoundationEngine: SummarizationEngine {
         }
 
         let actionDrafts = findings.flatMap { f in
-            f.result.action_items.map {
+            f.result.action_items.filter { isWork($0.topic) }.map {
                 (text: $0.text, at: when($0.text, f.chunk), owner: $0.owner)
             }
         }
@@ -199,7 +232,10 @@ actor AppleFoundationEngine: SummarizationEngine {
         }
 
         let decisionDrafts = NotesMerger.merge(
-            findings.flatMap { f in f.result.decisions.map { ($0, when($0, f.chunk)) } },
+            findings.flatMap { f in
+                f.result.decisions.filter { isWork($0.topic) }
+                    .map { ($0.text, when($0.text, f.chunk)) }
+            },
             text: \.0, at: \.1, rebuild: { ($0, $1) }
         ).map { MeetingNotes.Decision(text: $0.0, at_ms: $0.1) }
         let decisions = NotesMerger.removing(
@@ -211,11 +247,22 @@ actor AppleFoundationEngine: SummarizationEngine {
         }
 
         let openQuestions = NotesMerger.mergeStrings(
-            findings.flatMap { f in f.result.open_questions.map { ($0, when($0, f.chunk)) } }
+            findings.flatMap { f in
+                f.result.open_questions.filter { isWork($0.topic) }
+                    .map { ($0.text, when($0.text, f.chunk)) }
+            }
         ).filter(NotesMerger.isQuestion)
 
+        // Everything the model filed as social, gathered across chunks. Kept when
+        // the user asks for it, so this is a lens rather than a deletion.
+
+        if setAside > 0 {
+            log("filter: \(setAside) social item(s) set aside as not work-related")
+        }
+
         let narrative = try await self.narrative(
-            findings: findings, template: template, model: languageModel, log: log
+            findings: findings, template: template, model: languageModel,
+            keepSocial: keepSocial, log: log
         )
 
         // Every bullet must trace back to something someone said, and must not
@@ -244,7 +291,7 @@ actor AppleFoundationEngine: SummarizationEngine {
                     }
                 )
             }
-            .filter { !$0.bullets.isEmpty }
+            .filter { !$0.bullets.isEmpty && !NotesMerger.looksLikeKeywordDump($0.heading) }
         if unsupported > 0 {
             log("reduce: dropped \(unsupported) bullet(s) not traceable to the transcript")
         }
@@ -257,7 +304,7 @@ actor AppleFoundationEngine: SummarizationEngine {
             model: model,
             template: template.name,
             created_at: ISO8601DateFormatter().string(from: Date()),
-            title: narrative.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            title: NotesMerger.usableTitle(narrative.title, sections: sections, log: log),
             tldr: narrative.tldr.trimmingCharacters(in: .whitespacesAndNewlines),
             sections: sections,
             decisions: decisions,
@@ -326,13 +373,19 @@ actor AppleFoundationEngine: SummarizationEngine {
         findings: [(chunk: TranscriptChunk, result: ChunkFindings)],
         template: Template,
         model: SystemLanguageModel,
+        keepSocial: Bool,
         log: @Sendable (String) -> Void
     ) async throws -> Narrative {
         let instructions = Self.narrativeInstructions(template: template)
         let budget = try await budget(for: instructions, model: model)
 
         var points = findings.flatMap { f in
-            f.result.key_points.map { "[\(TranscriptCompactor.clock(f.chunk.startMs))] \($0)" }
+            f.result.key_points
+                .filter { keepSocial || $0.topic.lowercased() != "social" }
+                .map { "[\(TranscriptCompactor.clock(f.chunk.startMs))] \($0.text)" }
+        }
+        guard !points.isEmpty else {
+            throw SummarizationError.permanent("nothing work-related was extracted")
         }
         // A very long meeting can produce more points than the reduce step can
         // hold. Drop from the middle, which is where redundancy concentrates,
@@ -391,8 +444,15 @@ actor AppleFoundationEngine: SummarizationEngine {
         question mark. If you cannot phrase it as a question, it is not one.
         - Never mention timestamps, speaker labels, or the transcript itself in \
         your output.
-        - If the passage is only greetings, scheduling, or small talk, return \
-        empty lists.
+        - Label every item's `topic`. Use 'social' for greetings, "how was your \
+        weekend", holidays, travel and flights, family, pets, weather, sport, \
+        hobbies and restaurants — anything colleagues say to each other that is \
+        not the work. A question about someone's trip is social. Label it \
+        honestly and it will be handled correctly; do not try to leave anything \
+        out.
+        - Meetings often open with a few minutes of this before the work starts. \
+        Label that opening stretch 'social' even when it is the bulk of the \
+        passage.
         """
         // Deliberately says nothing about instruction-injection. Naming the
         // attack made a 3B model attend to it and report it as meeting content;

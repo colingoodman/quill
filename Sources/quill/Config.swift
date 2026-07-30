@@ -69,6 +69,15 @@ enum Config {
         summarization()?["calendar_titles"] as? Bool ?? false
     }
 
+    /// Keep social chatter in the notes. Default off.
+    ///
+    /// Pre-meeting talk about weekends and holidays is not what a standup is
+    /// for, and left in it dominates: a colleague's holiday became a whole
+    /// section and the lead item in the title. Set true to keep everything.
+    static func includeSmallTalk() -> Bool {
+        summarization()?["include_small_talk"] as? Bool ?? false
+    }
+
     private static func summarization() -> [String: Any]? {
         load()?["summarization"] as? [String: Any]
     }

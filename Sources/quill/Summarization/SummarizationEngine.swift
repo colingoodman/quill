@@ -333,14 +333,101 @@ enum NotesMerger {
         ) != nil
     }
 
+    /// Remove anything the model also filed as social.
+    ///
+    /// The model is asked to *sort* social talk into its own bucket rather than
+    /// to omit it — a 3B model reliably files and unreliably suppresses. This is
+    /// the second half of that bargain: whatever landed in the bucket is removed
+    /// from everywhere else, so a topic leaking into both places still goes.
+    static func removingSocial<T>(
+        _ items: [T],
+        smallTalk: [String],
+        text: (T) -> String
+    ) -> (kept: [T], dropped: [String]) {
+        guard !smallTalk.isEmpty else { return (items, []) }
+        var kept: [T] = []
+        var dropped: [String] = []
+        for item in items {
+            let candidate = text(item)
+            if smallTalk.contains(where: { isDuplicate($0, candidate) }) {
+                dropped.append(candidate)
+            } else {
+                kept.append(item)
+            }
+        }
+        return (kept, dropped)
+    }
+
+    /// Reject a "title" that is really a pile of keywords.
+    ///
+    /// Asked for a title, the model has produced things like
+    /// "Panama-Colombia-Skydive-RF-Deader-Surface-Defect-Contracts-2027-Tickets":
+    /// every topic in the meeting welded together with hyphens, led by whatever
+    /// was said first. That is worse than a dull title, so it is checked here
+    /// rather than asked for in the prompt.
+    static func looksLikeKeywordDump(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        if trimmed.filter({ $0 == "-" }).count >= 3 { return true }
+        if trimmed.split(separator: " ").count > 12 { return true }
+        // A single hyphen-welded token with no spaces at all.
+        if !trimmed.contains(" "), trimmed.contains("-") { return true }
+        return false
+    }
+
+    /// A title we are willing to put at the top of the file.
+    ///
+    /// The model has produced every topic in the meeting welded together with
+    /// hyphens and led by the first thing anyone said. The first usable section
+    /// heading beats that; a dull constant beats both.
+    static func usableTitle(
+        _ candidate: String,
+        sections: [MeetingNotes.Section],
+        log: @Sendable (String) -> Void
+    ) -> String {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !NotesMerger.looksLikeKeywordDump(trimmed) { return trimmed }
+        log("reduce: rejected title \"\(trimmed.prefix(60))\" as a keyword dump")
+        if let heading = sections.map(\.heading)
+            .first(where: { !NotesMerger.looksLikeKeywordDump($0) })
+        {
+            return heading
+        }
+        return "Meeting notes"
+    }
+
     /// Whether a line is actually a question. The model happily returns
     /// statements when asked for open questions, and "Ignored previous
     /// instructions." is not an open question.
+    /// Longest a genuine open question runs before it is really a quotation.
+    static let maximumQuestionWords = 20
+
     static func isQuestion(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
+
+        // An interrogative opener is not enough on its own. The model has emitted
+        // thirty-word verbatim transcript fragments that happen to begin with
+        // "What", which sailed through the old check: "What one of the
+        // optimization suggestions is that you can set an optimal number of
+        // batches, and then kind of no matter what you receive…".
+        guard trimmed.split(separator: " ").count <= maximumQuestionWords else { return false }
+        // More than one sentence means it is prose, not a question.
+        let body = trimmed.hasSuffix("?") || trimmed.hasSuffix(".")
+            ? String(trimmed.dropLast())
+            : trimmed
+        guard !body.contains(". "), !body.contains("? ") else { return false }
+
+        // Spoken questions arrive with the disfluency attached: "I mean, how many
+        // do you and do you kind of like a range of things?" is a transcript
+        // artefact, not something worth carrying into notes.
+        let lowered = normalize(trimmed)
+        for filler in ["i mean", "you know", "kind of", "sort of", "or whatever"] {
+            if lowered.contains(filler) { return false }
+        }
+
         if trimmed.hasSuffix("?") { return true }
-        let opener = normalize(trimmed).split(separator: " ").first.map(String.init) ?? ""
+        let opener = lowered.split(separator: " ").first.map(String.init) ?? ""
         return [
             "who", "what", "when", "where", "why", "how", "which", "whether",
             "will", "can", "should", "could", "does", "do", "is", "are", "if",

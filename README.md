@@ -189,6 +189,15 @@ are enforced in code rather than asked for in the prompt:
   and `transcript.json` is never altered.
 - **Duplicates are merged deterministically** across chunks, between decisions
   and action items, and across sections.
+- **Off-topic talk is labelled and dropped.** Every extracted item carries a
+  `work`/`social` label the model fills by constrained decoding, and social ones
+  are removed. Labelling is asked for because *omitting* is not: told to leave
+  small talk out, the model instead promoted a colleague's holiday into its own
+  section and into the title. Asking it to file each item and letting Swift act
+  on the label works. Set `summarization.include_small_talk` to keep everything.
+- **Titles are validated.** A title that is really a pile of keywords — every
+  topic in the meeting welded together with hyphens — is rejected in favour of
+  the first usable section heading.
 
 ### Templates
 
@@ -243,7 +252,8 @@ Optional, at `~/.config/quill/config.json`:
 {
   "recordings_dir": "~/Recordings",
   "transcription": { "enabled": true, "engine": "parakeet" },
-  "summarization": { "enabled": true, "template": "default", "calendar_titles": false },
+  "summarization": { "enabled": true, "template": "default",
+                     "include_small_talk": false, "calendar_titles": false },
   "on_stop": "my-hook"
 }
 ```
@@ -255,6 +265,9 @@ Optional, at `~/.config/quill/config.json`:
   `false`; needs macOS 26 with Apple Intelligence on.
 - `summarization.template` — which template shapes the notes. See
   `quill templates`.
+- `summarization.include_small_talk` — keep social chatter in the notes.
+  Default `false`. Pre-meeting talk about weekends and holidays otherwise
+  dominates a standup's notes.
 - `summarization.calendar_titles` — title notes after the calendar event the
   recording overlaps, which is usually better than one the model invents.
   Default `false`, and deliberately so: enabling it prompts for access to every
